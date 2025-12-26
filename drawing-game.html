@@ -4,6 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>猜画游戏 - 我画AI猜</title>
+    <!-- TensorFlow.js -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.15.0/dist/tf.min.js"></script>
+    <!-- MobileNet Model -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/mobilenet@2.1.0/dist/mobilenet.min.js"></script>
     <style>
         * {
             margin: 0;
@@ -247,7 +251,8 @@
 <body>
     <div class="container">
         <h1>🎨 猜画游戏</h1>
-        <p class="subtitle">你来画，AI来猜！画完后点击"让AI猜猜看"按钮</p>
+        <p class="subtitle">你来画，AI来猜！使用 TensorFlow.js MobileNet 深度学习模型识别</p>
+        <p class="subtitle" id="modelStatus" style="color: #ff6b6b; font-weight: bold;">🔄 AI模型加载中...</p>
 
         <div class="toolbar">
             <div class="tool-group">
@@ -279,7 +284,7 @@
         </div>
 
         <div class="actions">
-            <button class="btn-guess" id="guessBtn">🤖 让AI猜猜看</button>
+            <button class="btn-guess" id="guessBtn" disabled>🤖 让AI猜猜看</button>
         </div>
 
         <div class="result" id="result">
@@ -299,12 +304,41 @@
         let currentColor = '#000000';
         let brushSize = 3;
         let isEraser = false;
+        let model = null; // TensorFlow.js model
 
         // Initialize canvas
         ctx.fillStyle = 'white';
         ctx.fillRect(0, 0, canvas.width, canvas.height);
         ctx.lineCap = 'round';
         ctx.lineJoin = 'round';
+
+        // Load MobileNet model
+        async function loadModel() {
+            const statusEl = document.getElementById('modelStatus');
+            const guessBtn = document.getElementById('guessBtn');
+
+            try {
+                statusEl.textContent = '🔄 AI模型加载中...';
+                statusEl.style.color = '#ff6b6b';
+
+                model = await mobilenet.load();
+
+                statusEl.textContent = '✅ AI模型加载成功！可以开始画画了';
+                statusEl.style.color = '#4CAF50';
+                guessBtn.disabled = false;
+
+                setTimeout(() => {
+                    statusEl.style.display = 'none';
+                }, 3000);
+            } catch (error) {
+                statusEl.textContent = '❌ AI模型加载失败: ' + error.message;
+                statusEl.style.color = '#ff0000';
+                console.error('Model loading error:', error);
+            }
+        }
+
+        // Load model on page load
+        window.addEventListener('load', loadModel);
 
         // Color selection
         document.querySelectorAll('.color-btn').forEach(btn => {
@@ -404,7 +438,12 @@
         });
 
         // AI Guessing Logic
-        document.getElementById('guessBtn').addEventListener('click', function() {
+        document.getElementById('guessBtn').addEventListener('click', async function() {
+            if (!model) {
+                alert('AI模型未加载，请刷新页面重试');
+                return;
+            }
+
             const resultDiv = document.getElementById('result');
             const thinkingDiv = document.getElementById('thinking');
             const guessContent = document.getElementById('guessContent');
@@ -413,102 +452,148 @@
             thinkingDiv.style.display = 'block';
             guessContent.style.display = 'none';
 
-            // Simulate AI thinking
-            setTimeout(() => {
-                const guesses = analyzeDrawing();
+            try {
+                // Use real AI to analyze the drawing
+                const guesses = await analyzeDrawingWithAI();
                 displayGuesses(guesses);
                 thinkingDiv.style.display = 'none';
                 guessContent.style.display = 'block';
-            }, 2000);
+            } catch (error) {
+                thinkingDiv.textContent = '❌ AI识别失败: ' + error.message;
+                console.error('Prediction error:', error);
+            }
         });
 
-        function analyzeDrawing() {
+        async function analyzeDrawingWithAI() {
+            // Create a temporary image element from canvas
             const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-            const data = imageData.data;
 
-            let totalPixels = 0;
-            let coloredPixels = 0;
-            let colors = {};
-            let redTotal = 0, greenTotal = 0, blueTotal = 0;
+            // Create a temporary canvas to resize the image (MobileNet expects smaller images)
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = 224;
+            tempCanvas.height = 224;
+            const tempCtx = tempCanvas.getContext('2d');
 
-            // Analyze pixels
-            for (let i = 0; i < data.length; i += 4) {
-                const r = data[i];
-                const g = data[i + 1];
-                const b = data[i + 2];
+            // Draw the current canvas onto the temp canvas (resized)
+            tempCtx.drawImage(canvas, 0, 0, 224, 224);
 
-                totalPixels++;
+            // Get predictions from MobileNet
+            const predictions = await model.classify(tempCanvas);
 
-                // Check if pixel is not white
-                if (r < 250 || g < 250 || b < 250) {
-                    coloredPixels++;
-                    redTotal += r;
-                    greenTotal += g;
-                    blueTotal += b;
+            // Translate English predictions to Chinese and format them
+            const guesses = predictions.map((pred, index) => {
+                const translatedName = translatePrediction(pred.className);
+                const confidence = Math.round(pred.probability * 100);
 
-                    // Track dominant colors
-                    const colorKey = `${Math.floor(r/50)}-${Math.floor(g/50)}-${Math.floor(b/50)}`;
-                    colors[colorKey] = (colors[colorKey] || 0) + 1;
+                return {
+                    name: translatedName,
+                    originalName: pred.className,
+                    confidence: confidence,
+                    reason: `AI神经网络识别 (MobileNet)`
+                };
+            });
+
+            return guesses;
+        }
+
+        // Translate common predictions to Chinese
+        function translatePrediction(englishName) {
+            const translations = {
+                // Animals
+                'cat': '猫',
+                'dog': '狗',
+                'bird': '鸟',
+                'fish': '鱼',
+                'horse': '马',
+                'sheep': '羊',
+                'cow': '牛',
+                'elephant': '大象',
+                'bear': '熊',
+                'zebra': '斑马',
+                'giraffe': '长颈鹿',
+
+                // Objects
+                'car': '汽车',
+                'bicycle': '自行车',
+                'airplane': '飞机',
+                'boat': '船',
+                'train': '火车',
+                'truck': '卡车',
+                'bus': '公交车',
+
+                // Food
+                'apple': '苹果',
+                'banana': '香蕉',
+                'orange': '橙子',
+                'pizza': '披萨',
+                'cake': '蛋糕',
+                'bread': '面包',
+
+                // Household
+                'chair': '椅子',
+                'table': '桌子',
+                'cup': '杯子',
+                'bottle': '瓶子',
+                'book': '书',
+                'clock': '时钟',
+                'vase': '花瓶',
+                'lamp': '灯',
+
+                // Nature
+                'tree': '树',
+                'flower': '花',
+                'sun': '太阳',
+                'moon': '月亮',
+                'star': '星星',
+                'cloud': '云',
+
+                // Common objects
+                'pencil': '铅笔',
+                'pen': '钢笔',
+                'umbrella': '雨伞',
+                'bag': '包',
+                'shoe': '鞋子',
+                'hat': '帽子',
+                'glasses': '眼镜',
+
+                // Electronics
+                'computer': '电脑',
+                'phone': '手机',
+                'camera': '相机',
+                'television': '电视',
+
+                // Sports
+                'ball': '球',
+                'tennis': '网球',
+                'basketball': '篮球',
+                'football': '足球',
+
+                // Buildings
+                'house': '房子',
+                'building': '建筑',
+                'bridge': '桥',
+                'tower': '塔',
+
+                // Misc
+                'rainbow': '彩虹',
+                'heart': '心形',
+                'face': '脸',
+                'smile': '笑脸',
+                'wheel': '轮子',
+                'window': '窗户',
+                'door': '门'
+            };
+
+            // Try to find translation
+            const lowerName = englishName.toLowerCase();
+            for (const [eng, chn] of Object.entries(translations)) {
+                if (lowerName.includes(eng)) {
+                    return `${chn} (${englishName})`;
                 }
             }
 
-            // Calculate features
-            const coverage = (coloredPixels / totalPixels) * 100;
-            const avgRed = coloredPixels > 0 ? redTotal / coloredPixels : 0;
-            const avgGreen = coloredPixels > 0 ? greenTotal / coloredPixels : 0;
-            const avgBlue = coloredPixels > 0 ? blueTotal / coloredPixels : 0;
-            const colorCount = Object.keys(colors).length;
-
-            // Generate guesses based on analysis
-            const guesses = [];
-
-            // Guess based on coverage and complexity
-            if (coverage < 5) {
-                guesses.push({ name: '星星', confidence: 85, reason: '画面简洁，可能是简单图形' });
-                guesses.push({ name: '点', confidence: 75, reason: '绘制内容较少' });
-                guesses.push({ name: '字母或数字', confidence: 70, reason: '简单的线条' });
-            } else if (coverage < 15) {
-                guesses.push({ name: '笑脸', confidence: 82, reason: '适中的绘制面积，可能是表情' });
-                guesses.push({ name: '简单图案', confidence: 78, reason: '线条适中' });
-                guesses.push({ name: '花朵', confidence: 75, reason: '可能的对称图形' });
-            } else if (coverage < 30) {
-                if (colorCount > 5) {
-                    guesses.push({ name: '彩虹', confidence: 88, reason: '多种颜色，中等覆盖' });
-                    guesses.push({ name: '风景画', confidence: 80, reason: '丰富的色彩' });
-                } else {
-                    guesses.push({ name: '房子', confidence: 85, reason: '中等复杂度的图形' });
-                    guesses.push({ name: '汽车', confidence: 78, reason: '结构化的绘画' });
-                    guesses.push({ name: '动物', confidence: 75, reason: '有一定细节' });
-                }
-            } else {
-                guesses.push({ name: '复杂场景', confidence: 80, reason: '大面积绘制' });
-                guesses.push({ name: '人物', confidence: 75, reason: '丰富的细节' });
-                guesses.push({ name: '风景', confidence: 72, reason: '覆盖面积大' });
-            }
-
-            // Color-based guessing
-            if (avgRed > 150 && avgGreen < 100 && avgBlue < 100) {
-                guesses.unshift({ name: '苹果或心形', confidence: 90, reason: '主要使用红色' });
-            } else if (avgGreen > 150 && avgRed < 100 && avgBlue < 100) {
-                guesses.unshift({ name: '树或草地', confidence: 88, reason: '主要使用绿色' });
-            } else if (avgBlue > 150 && avgRed < 100 && avgGreen < 100) {
-                guesses.unshift({ name: '天空或海洋', confidence: 87, reason: '主要使用蓝色' });
-            } else if (avgRed > 200 && avgGreen > 200 && avgBlue < 100) {
-                guesses.unshift({ name: '太阳或香蕉', confidence: 89, reason: '主要使用黄色' });
-            }
-
-            // Return top 5 unique guesses
-            const uniqueGuesses = [];
-            const seen = new Set();
-            for (const guess of guesses) {
-                if (!seen.has(guess.name)) {
-                    seen.add(guess.name);
-                    uniqueGuesses.push(guess);
-                    if (uniqueGuesses.length >= 5) break;
-                }
-            }
-
-            return uniqueGuesses;
+            // If no translation found, return original with note
+            return englishName;
         }
 
         function displayGuesses(guesses) {
