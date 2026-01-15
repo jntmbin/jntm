@@ -1,0 +1,641 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Tank Turmoil - HTML5 Canvas</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: "Segoe UI", "Noto Sans", sans-serif;
+    }
+    body {
+      margin: 0;
+      background: #0d0f12;
+      color: #e5e7eb;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+    }
+    header {
+      width: min(1100px, 95vw);
+      margin: 18px 0 8px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .panel {
+      background: #151a21;
+      border: 1px solid #232a35;
+      border-radius: 10px;
+      padding: 10px 14px;
+      box-shadow: 0 6px 14px rgba(0,0,0,0.4);
+    }
+    #info {
+      display: grid;
+      gap: 4px;
+      font-size: 14px;
+      line-height: 1.4;
+    }
+    canvas {
+      border: 2px solid #222b36;
+      border-radius: 12px;
+      background: #0f1318;
+      box-shadow: inset 0 0 35px rgba(0,0,0,0.6);
+      max-width: 95vw;
+    }
+    .controls {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      font-size: 14px;
+    }
+    select, button {
+      background: #1b222c;
+      color: #e5e7eb;
+      border: 1px solid #2c3645;
+      border-radius: 6px;
+      padding: 6px 10px;
+      font-size: 14px;
+    }
+    button:hover, select:hover {
+      border-color: #3b4558;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div id="info" class="panel">
+      <div><strong>玩家1</strong>：WASD 移动，Q/E 旋转，空格发射</div>
+      <div><strong>胜负</strong>：先到 5 分获胜，坦克可被反弹子弹误伤</div>
+      <div><strong>AI</strong>：会追击、躲子弹、尝试 0~2 次反弹瞄准</div>
+    </div>
+    <div class="panel controls">
+      <label for="difficulty">难度：</label>
+      <select id="difficulty">
+        <option value="easy">Easy</option>
+        <option value="normal" selected>Normal</option>
+        <option value="hard">Hard</option>
+      </select>
+      <button id="restart">重新开始</button>
+    </div>
+  </header>
+  <canvas id="game" width="960" height="640"></canvas>
+
+  <script>
+    const canvas = document.getElementById("game");
+    const ctx = canvas.getContext("2d");
+    const difficultySelect = document.getElementById("difficulty");
+    const restartBtn = document.getElementById("restart");
+
+    const TAU = Math.PI * 2;
+    const world = {
+      width: canvas.width,
+      height: canvas.height,
+      cellSize: 64,
+      wallThickness: 10,
+      walls: []
+    };
+
+    const settings = {
+      maxScore: 5,
+      bulletSpeed: 380,
+      bulletLife: 10,
+      bulletMaxBounces: 8,
+      tankRadius: 18,
+      tankMaxSpeed: 170,
+      tankAcceleration: 520,
+      tankFriction: 0.86,
+      rotationSpeed: 2.6,
+      fireCooldown: 0.4,
+      aiCooldown: 0.5
+    };
+
+    const keyState = new Map();
+    window.addEventListener("keydown", (event) => {
+      keyState.set(event.code, true);
+      if (["Space", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.code)) {
+        event.preventDefault();
+      }
+    });
+    window.addEventListener("keyup", (event) => keyState.set(event.code, false));
+
+    class Tank {
+      constructor(x, y, color) {
+        this.x = x;
+        this.y = y;
+        this.color = color;
+        this.angle = 0;
+        this.vx = 0;
+        this.vy = 0;
+        this.cooldown = 0;
+        this.alive = true;
+      }
+
+      update(dt) {
+        if (!this.alive) return;
+        this.x += this.vx * dt;
+        this.resolveCollisions("x");
+        this.y += this.vy * dt;
+        this.resolveCollisions("y");
+        this.vx *= settings.tankFriction;
+        this.vy *= settings.tankFriction;
+        this.cooldown = Math.max(0, this.cooldown - dt);
+      }
+
+      resolveCollisions(axis) {
+        const radius = settings.tankRadius;
+        for (const wall of world.walls) {
+          if (circleRectIntersect(this.x, this.y, radius, wall)) {
+            if (axis === "x") {
+              if (this.x < wall.x) this.x = wall.x - radius;
+              if (this.x > wall.x + wall.w) this.x = wall.x + wall.w + radius;
+              this.vx = 0;
+            } else {
+              if (this.y < wall.y) this.y = wall.y - radius;
+              if (this.y > wall.y + wall.h) this.y = wall.y + wall.h + radius;
+              this.vy = 0;
+            }
+          }
+        }
+        this.x = clamp(this.x, radius + 2, world.width - radius - 2);
+        this.y = clamp(this.y, radius + 2, world.height - radius - 2);
+      }
+
+      fire(bullets) {
+        if (this.cooldown > 0 || !this.alive) return;
+        const tipX = this.x + Math.cos(this.angle) * (settings.tankRadius + 6);
+        const tipY = this.y + Math.sin(this.angle) * (settings.tankRadius + 6);
+        bullets.push(new Bullet(tipX, tipY, Math.cos(this.angle) * settings.bulletSpeed, Math.sin(this.angle) * settings.bulletSpeed, this));
+        this.cooldown = settings.fireCooldown;
+      }
+    }
+
+    class Bullet {
+      constructor(x, y, vx, vy, owner) {
+        this.x = x;
+        this.y = y;
+        this.vx = vx;
+        this.vy = vy;
+        this.radius = 5;
+        this.owner = owner;
+        this.life = settings.bulletLife;
+        this.bounces = 0;
+      }
+
+      update(dt) {
+        this.life -= dt;
+        this.x += this.vx * dt;
+        this.y += this.vy * dt;
+        for (const wall of world.walls) {
+          if (circleRectIntersect(this.x, this.y, this.radius, wall)) {
+            // 根据接触面反射：比较水平/垂直重叠量
+            const closestX = clamp(this.x, wall.x, wall.x + wall.w);
+            const closestY = clamp(this.y, wall.y, wall.y + wall.h);
+            const dx = this.x - closestX;
+            const dy = this.y - closestY;
+            if (Math.abs(dx) > Math.abs(dy)) {
+              this.vx *= -1;
+              this.x += Math.sign(dx) * 2;
+            } else {
+              this.vy *= -1;
+              this.y += Math.sign(dy) * 2;
+            }
+            this.bounces += 1;
+          }
+        }
+        if (this.x < this.radius || this.x > world.width - this.radius) {
+          this.vx *= -1;
+          this.x = clamp(this.x, this.radius, world.width - this.radius);
+          this.bounces += 1;
+        }
+        if (this.y < this.radius || this.y > world.height - this.radius) {
+          this.vy *= -1;
+          this.y = clamp(this.y, this.radius, world.height - this.radius);
+          this.bounces += 1;
+        }
+      }
+    }
+
+    class AIController {
+      constructor(tank, target) {
+        this.tank = tank;
+        this.target = target;
+        this.aimCooldown = 0;
+        this.evadeTimer = 0;
+      }
+
+      update(dt, bullets) {
+        if (!this.tank.alive) return;
+        const difficulty = difficultySelect.value;
+        const config = {
+          easy: { aimSamples: 60, dodgeTime: 0.6, aimCooldown: 0.9, aggression: 0.5, aimRange: 1 },
+          normal: { aimSamples: 110, dodgeTime: 0.8, aimCooldown: 0.6, aggression: 0.7, aimRange: 1.5 },
+          hard: { aimSamples: 200, dodgeTime: 1.0, aimCooldown: 0.4, aggression: 0.9, aimRange: 2 }
+        }[difficulty];
+
+        this.aimCooldown = Math.max(0, this.aimCooldown - dt);
+        this.evadeTimer = Math.max(0, this.evadeTimer - dt);
+
+        // 子弹预测：模拟 0.6~1.0 秒内轨迹（含反弹近似）
+        const danger = this.predictDanger(bullets, config.dodgeTime);
+        if (danger) {
+          this.evadeTimer = 0.5;
+        }
+
+        const toTarget = Math.atan2(this.target.y - this.tank.y, this.target.x - this.tank.x);
+        let desiredAngle = toTarget;
+        if (this.evadeTimer > 0) {
+          desiredAngle = toTarget + Math.PI / 2;
+        }
+
+        const angleDiff = normalizeAngle(desiredAngle - this.tank.angle);
+        this.tank.angle += clamp(angleDiff, -settings.rotationSpeed * dt, settings.rotationSpeed * dt);
+
+        const thrust = this.evadeTimer > 0 ? -1 : 1;
+        const accel = settings.tankAcceleration * thrust * config.aggression;
+        this.tank.vx += Math.cos(this.tank.angle) * accel * dt;
+        this.tank.vy += Math.sin(this.tank.angle) * accel * dt;
+        limitSpeed(this.tank, settings.tankMaxSpeed);
+
+        // 反弹瞄准：离散采样 0~2 次反弹
+        if (this.aimCooldown <= 0 && this.tank.cooldown <= 0) {
+          const candidate = this.findBounceShot(config.aimSamples, config.aimRange);
+          if (candidate) {
+            this.tank.angle = candidate.angle;
+            this.tank.fire(game.bullets);
+            this.aimCooldown = config.aimCooldown;
+          }
+        }
+      }
+
+      predictDanger(bullets, horizon) {
+        const tank = this.tank;
+        for (const bullet of bullets) {
+          let simX = bullet.x;
+          let simY = bullet.y;
+          let simVX = bullet.vx;
+          let simVY = bullet.vy;
+          const steps = Math.floor(horizon / 0.08);
+          for (let i = 0; i < steps; i += 1) {
+            simX += simVX * 0.08;
+            simY += simVY * 0.08;
+            for (const wall of world.walls) {
+              if (circleRectIntersect(simX, simY, bullet.radius, wall)) {
+                const closestX = clamp(simX, wall.x, wall.x + wall.w);
+                const closestY = clamp(simY, wall.y, wall.y + wall.h);
+                const dx = simX - closestX;
+                const dy = simY - closestY;
+                if (Math.abs(dx) > Math.abs(dy)) {
+                  simVX *= -1;
+                } else {
+                  simVY *= -1;
+                }
+              }
+            }
+            if (simX < bullet.radius || simX > world.width - bullet.radius) simVX *= -1;
+            if (simY < bullet.radius || simY > world.height - bullet.radius) simVY *= -1;
+            const dist = Math.hypot(simX - tank.x, simY - tank.y);
+            if (dist < settings.tankRadius + 8) return true;
+          }
+        }
+        return false;
+      }
+
+      findBounceShot(samples, maxBounces) {
+        const tank = this.tank;
+        const target = this.target;
+        let best = null;
+        for (let i = 0; i < samples; i += 1) {
+          const angle = (i / samples) * TAU;
+          const hit = simulateShot(tank.x, tank.y, angle, target, maxBounces);
+          if (hit) {
+            best = { angle, score: hit.time };
+            break;
+          }
+        }
+        return best;
+      }
+    }
+
+    function simulateShot(x, y, angle, target, maxBounces) {
+      // 镜像 / 离散模拟反弹轨迹，返回命中时间
+      let sx = x;
+      let sy = y;
+      let vx = Math.cos(angle) * settings.bulletSpeed;
+      let vy = Math.sin(angle) * settings.bulletSpeed;
+      let bounces = 0;
+      const dt = 0.05;
+      for (let t = 0; t < 2.2; t += dt) {
+        sx += vx * dt;
+        sy += vy * dt;
+        for (const wall of world.walls) {
+          if (circleRectIntersect(sx, sy, 5, wall)) {
+            const closestX = clamp(sx, wall.x, wall.x + wall.w);
+            const closestY = clamp(sy, wall.y, wall.y + wall.h);
+            const dx = sx - closestX;
+            const dy = sy - closestY;
+            if (Math.abs(dx) > Math.abs(dy)) {
+              vx *= -1;
+            } else {
+              vy *= -1;
+            }
+            bounces += 1;
+            if (bounces > maxBounces) return null;
+          }
+        }
+        if (sx < 5 || sx > world.width - 5) {
+          vx *= -1;
+          bounces += 1;
+        }
+        if (sy < 5 || sy > world.height - 5) {
+          vy *= -1;
+          bounces += 1;
+        }
+        const dist = Math.hypot(sx - target.x, sy - target.y);
+        if (dist < settings.tankRadius) {
+          return { time: t };
+        }
+      }
+      return null;
+    }
+
+    const game = {
+      player: new Tank(120, 120, "#4ade80"),
+      ai: new Tank(820, 520, "#f87171"),
+      bullets: [],
+      score: { player: 0, ai: 0 },
+      roundOver: false,
+      roundTimer: 0,
+      fps: 0,
+      aiController: null
+    };
+
+    function resetRound() {
+      game.bullets = [];
+      game.player = new Tank(120, 120, "#4ade80");
+      game.ai = new Tank(world.width - 120, world.height - 120, "#f87171");
+      game.ai.angle = Math.PI;
+      game.aiController = new AIController(game.ai, game.player);
+      game.roundOver = false;
+      game.roundTimer = 0;
+      generateMaze();
+    }
+
+    function restartGame() {
+      game.score.player = 0;
+      game.score.ai = 0;
+      resetRound();
+    }
+
+    function generateMaze() {
+      const cols = Math.floor(world.width / world.cellSize);
+      const rows = Math.floor(world.height / world.cellSize);
+      const visited = Array.from({ length: rows }, () => Array(cols).fill(false));
+      const stack = [[0, 0]];
+      visited[0][0] = true;
+      const walls = [];
+
+      const cellWalls = Array.from({ length: rows }, () => Array.from({ length: cols }, () => ({
+        top: true,
+        right: true,
+        bottom: true,
+        left: true
+      })));
+
+      while (stack.length) {
+        const [cx, cy] = stack[stack.length - 1];
+        const neighbors = [];
+        if (cy > 0 && !visited[cy - 1][cx]) neighbors.push([cx, cy - 1, "top"]);
+        if (cx < cols - 1 && !visited[cy][cx + 1]) neighbors.push([cx + 1, cy, "right"]);
+        if (cy < rows - 1 && !visited[cy + 1][cx]) neighbors.push([cx, cy + 1, "bottom"]);
+        if (cx > 0 && !visited[cy][cx - 1]) neighbors.push([cx - 1, cy, "left"]);
+
+        if (!neighbors.length) {
+          stack.pop();
+          continue;
+        }
+        const [nx, ny, dir] = neighbors[Math.floor(Math.random() * neighbors.length)];
+        if (dir === "top") {
+          cellWalls[cy][cx].top = false;
+          cellWalls[ny][nx].bottom = false;
+        }
+        if (dir === "right") {
+          cellWalls[cy][cx].right = false;
+          cellWalls[ny][nx].left = false;
+        }
+        if (dir === "bottom") {
+          cellWalls[cy][cx].bottom = false;
+          cellWalls[ny][nx].top = false;
+        }
+        if (dir === "left") {
+          cellWalls[cy][cx].left = false;
+          cellWalls[ny][nx].right = false;
+        }
+        visited[ny][nx] = true;
+        stack.push([nx, ny]);
+      }
+
+      for (let y = 0; y < rows; y += 1) {
+        for (let x = 0; x < cols; x += 1) {
+          const cell = cellWalls[y][x];
+          const x0 = x * world.cellSize;
+          const y0 = y * world.cellSize;
+          const size = world.cellSize;
+          const t = world.wallThickness;
+          if (cell.top) walls.push({ x: x0, y: y0, w: size, h: t });
+          if (cell.left) walls.push({ x: x0, y: y0, w: t, h: size });
+          if (cell.bottom) walls.push({ x: x0, y: y0 + size - t, w: size, h: t });
+          if (cell.right) walls.push({ x: x0 + size - t, y: y0, w: t, h: size });
+        }
+      }
+
+      // 清理出生点
+      world.walls = walls.filter((wall) => {
+        const playerSafe = !circleRectIntersect(120, 120, 40, wall);
+        const aiSafe = !circleRectIntersect(world.width - 120, world.height - 120, 40, wall);
+        return playerSafe && aiSafe;
+      });
+    }
+
+    function updatePlayer(dt) {
+      const tank = game.player;
+      if (!tank.alive) return;
+
+      const forward = keyState.get("KeyW") ? 1 : 0;
+      const back = keyState.get("KeyS") ? 1 : 0;
+      const left = keyState.get("KeyA") ? 1 : 0;
+      const right = keyState.get("KeyD") ? 1 : 0;
+      const rotLeft = keyState.get("KeyQ") ? 1 : 0;
+      const rotRight = keyState.get("KeyE") ? 1 : 0;
+
+      const moveX = (right - left) * settings.tankAcceleration;
+      const moveY = (forward - back) * settings.tankAcceleration;
+      tank.vx += moveX * dt;
+      tank.vy += moveY * dt;
+      limitSpeed(tank, settings.tankMaxSpeed);
+
+      tank.angle += (rotRight - rotLeft) * settings.rotationSpeed * dt;
+
+      if (keyState.get("Space")) {
+        tank.fire(game.bullets);
+      }
+    }
+
+    function updateBullets(dt) {
+      const player = game.player;
+      const ai = game.ai;
+      for (const bullet of game.bullets) {
+        bullet.update(dt);
+        if (bullet.life <= 0 || bullet.bounces > settings.bulletMaxBounces) {
+          bullet.expired = true;
+          continue;
+        }
+        if (player.alive && circleCircleIntersect(bullet.x, bullet.y, bullet.radius, player.x, player.y, settings.tankRadius)) {
+          player.alive = false;
+          game.roundOver = true;
+          game.score.ai += 1;
+        }
+        if (ai.alive && circleCircleIntersect(bullet.x, bullet.y, bullet.radius, ai.x, ai.y, settings.tankRadius)) {
+          ai.alive = false;
+          game.roundOver = true;
+          game.score.player += 1;
+        }
+      }
+      game.bullets = game.bullets.filter((bullet) => !bullet.expired);
+    }
+
+    function draw() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = "#0f1318";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      // Maze
+      ctx.fillStyle = "#1f2630";
+      for (const wall of world.walls) {
+        ctx.fillRect(wall.x, wall.y, wall.w, wall.h);
+      }
+
+      // Bullets
+      for (const bullet of game.bullets) {
+        ctx.fillStyle = bullet.owner === game.player ? "#86efac" : "#fca5a5";
+        ctx.beginPath();
+        ctx.arc(bullet.x, bullet.y, bullet.radius, 0, TAU);
+        ctx.fill();
+      }
+
+      drawTank(game.player);
+      drawTank(game.ai);
+
+      // HUD
+      ctx.fillStyle = "rgba(0,0,0,0.6)";
+      ctx.fillRect(10, 10, 300, 72);
+      ctx.fillStyle = "#e5e7eb";
+      ctx.font = "14px Segoe UI";
+      ctx.fillText(`玩家 ${game.score.player} : ${game.score.ai} AI`, 20, 32);
+      ctx.fillText(`难度: ${difficultySelect.value.toUpperCase()} | FPS: ${game.fps.toFixed(0)}`, 20, 52);
+      ctx.fillText("Q/E 旋转  |  WASD 移动  |  Space 发射", 20, 72);
+
+      if (game.roundOver) {
+        ctx.fillStyle = "rgba(0,0,0,0.65)";
+        ctx.fillRect(0, canvas.height / 2 - 40, canvas.width, 80);
+        ctx.fillStyle = "#f8fafc";
+        ctx.font = "26px Segoe UI";
+        const text = game.player.alive ? "AI 击毁！" : "你被击中！";
+        const winner = game.score.player >= settings.maxScore ? "玩家获胜" : game.score.ai >= settings.maxScore ? "AI 获胜" : "下一局准备...";
+        ctx.fillText(text, canvas.width / 2 - ctx.measureText(text).width / 2, canvas.height / 2 - 6);
+        ctx.font = "18px Segoe UI";
+        ctx.fillText(winner, canvas.width / 2 - ctx.measureText(winner).width / 2, canvas.height / 2 + 20);
+      }
+    }
+
+    function drawTank(tank) {
+      if (!tank) return;
+      ctx.save();
+      ctx.translate(tank.x, tank.y);
+      ctx.rotate(tank.angle);
+      ctx.fillStyle = tank.color;
+      ctx.beginPath();
+      ctx.arc(0, 0, settings.tankRadius, 0, TAU);
+      ctx.fill();
+      ctx.fillStyle = "#0b0f14";
+      ctx.fillRect(0, -5, settings.tankRadius + 12, 10);
+      ctx.fillStyle = "rgba(255,255,255,0.15)";
+      ctx.fillRect(-settings.tankRadius / 2, -settings.tankRadius / 2, settings.tankRadius, settings.tankRadius);
+      ctx.restore();
+    }
+
+    function circleRectIntersect(cx, cy, radius, rect) {
+      const closestX = clamp(cx, rect.x, rect.x + rect.w);
+      const closestY = clamp(cy, rect.y, rect.y + rect.h);
+      const dx = cx - closestX;
+      const dy = cy - closestY;
+      return dx * dx + dy * dy <= radius * radius;
+    }
+
+    function circleCircleIntersect(x1, y1, r1, x2, y2, r2) {
+      const dx = x1 - x2;
+      const dy = y1 - y2;
+      return dx * dx + dy * dy <= (r1 + r2) * (r1 + r2);
+    }
+
+    function clamp(value, min, max) {
+      return Math.max(min, Math.min(max, value));
+    }
+
+    function normalizeAngle(angle) {
+      let a = angle;
+      while (a > Math.PI) a -= TAU;
+      while (a < -Math.PI) a += TAU;
+      return a;
+    }
+
+    function limitSpeed(tank, maxSpeed) {
+      const speed = Math.hypot(tank.vx, tank.vy);
+      if (speed > maxSpeed) {
+        const scale = maxSpeed / speed;
+        tank.vx *= scale;
+        tank.vy *= scale;
+      }
+    }
+
+    let lastTime = performance.now();
+    function loop(now) {
+      const dt = Math.min(0.033, (now - lastTime) / 1000);
+      lastTime = now;
+      game.fps = 1 / dt;
+
+      if (!game.roundOver) {
+        updatePlayer(dt);
+        game.aiController.update(dt, game.bullets);
+        game.player.update(dt);
+        game.ai.update(dt);
+        updateBullets(dt);
+      } else {
+        game.roundTimer += dt;
+        if (game.roundTimer > 1.4) {
+          if (game.score.player >= settings.maxScore || game.score.ai >= settings.maxScore) {
+            restartGame();
+          } else {
+            resetRound();
+          }
+        }
+      }
+
+      draw();
+      requestAnimationFrame(loop);
+    }
+
+    restartBtn.addEventListener("click", restartGame);
+    difficultySelect.addEventListener("change", () => {
+      game.aiController = new AIController(game.ai, game.player);
+    });
+
+    resetRound();
+    requestAnimationFrame(loop);
+  </script>
+</body>
+</html>
